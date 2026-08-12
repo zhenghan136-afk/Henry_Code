@@ -1,5 +1,7 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -27,6 +29,21 @@ namespace MapleStory
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
 
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+        [DllImport("user32.dll")]
+        private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int Left, Top, Right, Bottom; }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT { public int X, Y; }
+
         // 強制指定結構大小為 40 位元組，符合 64 位元作業系統標準
         [StructLayout(LayoutKind.Explicit, Size = 40)]
         struct INPUT
@@ -48,11 +65,33 @@ namespace MapleStory
         const int WM_HOTKEY = 0x0312;
         const int STOP_HOTKEY_ID = 7777;
         const uint VK_F11 = 0x7A;
+        const int CAST_HOTKEY_ID = 7778;
+        const uint VK_F5 = 0x74;
 
         private CancellationTokenSource _cts;
         private int currentTemplate = 1;
         private string _targetWindowKeyword = "MapleStory";
         private bool _lastFocusState = true;
+
+        // MP 監控：不含 F5/F11，因為那兩個是本程式自己註冊的全域熱鍵，
+        // 若補 MP 鍵也用同一個鍵，SendInput 送出的按鍵會被自己的 RegisterHotKey 攔截、到不了遊戲。
+        private static readonly Dictionary<string, ushort> PotionKeyMap = new()
+        {
+            ["Page Down"] = 0x22,
+            ["Insert"] = 0x2D,
+            ["Home"] = 0x24,
+            ["End"] = 0x23,
+            ["0"] = 0x30, ["1"] = 0x31, ["2"] = 0x32, ["3"] = 0x33, ["4"] = 0x34,
+            ["5"] = 0x35, ["6"] = 0x36, ["7"] = 0x37, ["8"] = 0x38, ["9"] = 0x39,
+            ["F1"] = 0x70, ["F2"] = 0x71, ["F3"] = 0x72, ["F4"] = 0x73,
+            ["F6"] = 0x75, ["F7"] = 0x76, ["F8"] = 0x77, ["F9"] = 0x78, ["F10"] = 0x79, ["F12"] = 0x7B,
+        };
+
+        private Rectangle _mpBarRelativeRect; // 相對於遊戲視窗「客戶區」左上角的座標
+        private bool _mpBarCalibrated = false;
+        private CancellationTokenSource _mpMonitorCts;
+        private int _mpThresholdPercent = 30;
+        private ushort _mpPotionKey = 0x22;
 
         public Form1()
         {
@@ -68,15 +107,33 @@ namespace MapleStory
                 MessageBox.Show("F11 熱鍵註冊失敗，可能被其他程式佔用了");
             }
 
-            cmbTemplate.Items.AddRange(new object[] { "Set 1", "Set 2" });
+            // 註冊 F5 為 Set 3 的施放技能熱鍵，這樣選到 Set 3 時不用切回工具視窗按按鈕
+            bool castHotkeySuccess = RegisterHotKey(this.Handle, CAST_HOTKEY_ID, 0, VK_F5);
+            if (!castHotkeySuccess)
+            {
+                MessageBox.Show("F5 熱鍵註冊失敗，可能被其他程式佔用了");
+            }
+
+            cmbTemplate.Items.AddRange(new object[] { "Set 1", "Set 2", "Set 3" });
             cmbTemplate.SelectedIndex = 0;
             btnStop.Enabled = false;
+
+            foreach (string key in PotionKeyMap.Keys)
+            {
+                cmbMpPotionKey.Items.Add(key);
+            }
+            cmbMpPotionKey.SelectedItem = "Page Down";
+
             SetStatus("待機中");
         }
 
         private void cmbTemplate_SelectedIndexChanged(object sender, EventArgs e)
         {
             currentTemplate = cmbTemplate.SelectedIndex + 1;
+
+            // Set 3 是手動一次性施放技能組合，不走 Start/Stop 那種持續迴圈，
+            // 選到 Set 3 時額外顯示「施放技能」鍵，Start/Stop 一律保留不隱藏。
+            btnCastSet3.Visible = currentTemplate == 3;
         }
 
         // 同步更新狀態列文字與標題列，這樣即使視窗被切到背景／縮到工作列，
@@ -116,15 +173,25 @@ namespace MapleStory
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             _cts?.Cancel();
+            _mpMonitorCts?.Cancel();
             UnregisterHotKey(this.Handle, STOP_HOTKEY_ID);
+            UnregisterHotKey(this.Handle, CAST_HOTKEY_ID);
             base.OnFormClosing(e);
         }
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == STOP_HOTKEY_ID)
+            if (m.Msg == WM_HOTKEY)
             {
-                ExecuteStop();
+                int hotkeyId = m.WParam.ToInt32();
+                if (hotkeyId == STOP_HOTKEY_ID)
+                {
+                    ExecuteStop();
+                }
+                else if (hotkeyId == CAST_HOTKEY_ID)
+                {
+                    ExecuteCastSet3Hotkey();
+                }
             }
             base.WndProc(ref m);
         }
@@ -183,6 +250,12 @@ namespace MapleStory
         private async void btnStart_Click(object sender, EventArgs e)
         {
             if (_cts != null) return;
+
+            if (currentTemplate == 3)
+            {
+                MessageBox.Show("Set 3 請改用「施放技能」按鈕。");
+                return;
+            }
 
             _cts = new CancellationTokenSource();
             btnStart.Enabled = false;
@@ -391,6 +464,254 @@ namespace MapleStory
             btnStop.Enabled = false;
             SetStatus("停止中...");
             _cts.Cancel();
+        }
+
+        // ==========================================
+        // Set 3：依序施放 A > F > X > C 一輪就結束（不會持續循環）
+        private async void btnCastSet3_Click(object sender, EventArgs e)
+        {
+            await CastSet3Async();
+        }
+
+        // F5 熱鍵版本：只有選到 Set 3 時才有作用，避免在 Set 1/2 執行中誤觸
+        private async void ExecuteCastSet3Hotkey()
+        {
+            if (currentTemplate != 3) return;
+            await CastSet3Async();
+        }
+
+        private async Task CastSet3Async()
+        {
+            if (!btnCastSet3.Enabled) return; // 正在施放中，避免重複觸發
+
+            btnCastSet3.Enabled = false;
+            cmbTemplate.Enabled = false;
+            txtWindowTitle.Enabled = false;
+            SetStatus("施放中 - Set 3");
+
+            try
+            {
+                await SendKeyHardwareAsync(0x41, CancellationToken.None); // A
+                await Task.Delay(Random.Shared.Next(1000, 3001));
+                await SendKeyHardwareAsync(0x46, CancellationToken.None); // F
+                await Task.Delay(Random.Shared.Next(1000, 3001));
+                await SendKeyHardwareAsync(0x58, CancellationToken.None); // X
+                await Task.Delay(Random.Shared.Next(1000, 3001));
+                await SendKeyHardwareAsync(0x43, CancellationToken.None); // C
+            }
+            finally
+            {
+                btnCastSet3.Enabled = true;
+                cmbTemplate.Enabled = true;
+                txtWindowTitle.Enabled = true;
+                SetStatus("待機中");
+            }
+        }
+
+        // ==========================================
+        // MP 監控：抓螢幕上 MP 條那塊區域的顏色，量測填滿比例，低於門檻就按補 MP 鍵
+
+        // 用標題關鍵字找遊戲視窗，不管它目前是不是前景視窗
+        // （校準當下使用者點的是本工具的按鈕，前景視窗會是本工具自己，不是遊戲）
+        private IntPtr FindGameWindow()
+        {
+            IntPtr found = IntPtr.Zero;
+            EnumWindows((hWnd, lParam) =>
+            {
+                if (!IsWindowVisible(hWnd)) return true;
+
+                var sb = new StringBuilder(256);
+                GetWindowText(hWnd, sb, sb.Capacity);
+                if (sb.Length > 0 && sb.ToString().IndexOf(_targetWindowKeyword, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    found = hWnd;
+                    return false;
+                }
+                return true;
+            }, IntPtr.Zero);
+            return found;
+        }
+
+        private static Rectangle GetGameClientScreenRect(IntPtr hWnd)
+        {
+            GetClientRect(hWnd, out RECT rect);
+            POINT topLeft = new POINT { X = 0, Y = 0 };
+            ClientToScreen(hWnd, ref topLeft);
+            return new Rectangle(topLeft.X, topLeft.Y, rect.Right - rect.Left, rect.Bottom - rect.Top);
+        }
+
+        private void btnCalibrateMp_Click(object sender, EventArgs e)
+        {
+            IntPtr gameHwnd = FindGameWindow();
+            if (gameHwnd == IntPtr.Zero)
+            {
+                MessageBox.Show($"找不到標題包含「{_targetWindowKeyword}」的視窗，請確認遊戲已開啟。");
+                return;
+            }
+
+            // 先縮小工具視窗，避免半透明覆蓋層上還疊著自己的視窗擋住遊戲畫面
+            this.WindowState = FormWindowState.Minimized;
+
+            Rectangle selected;
+            using (var selector = new RegionSelectorForm())
+            {
+                bool confirmed = selector.ShowDialog() == DialogResult.OK;
+                selected = selector.SelectedRectangle;
+                this.WindowState = FormWindowState.Normal;
+                if (!confirmed) return;
+            }
+
+            if (selected.Width < 3 || selected.Height < 1)
+            {
+                MessageBox.Show("選取範圍太小，請重新框選 MP 條。");
+                return;
+            }
+
+            Rectangle clientRect = GetGameClientScreenRect(gameHwnd);
+            _mpBarRelativeRect = new Rectangle(
+                selected.X - clientRect.X,
+                selected.Y - clientRect.Y,
+                selected.Width,
+                selected.Height);
+            _mpBarCalibrated = true;
+            lblMpStatus.Text = $"MP 範圍已校準（{_mpBarRelativeRect.Width}x{_mpBarRelativeRect.Height}）";
+        }
+
+        private void chkMpMonitor_CheckedChanged(object sender, EventArgs e)
+        {
+            if (chkMpMonitor.Checked)
+            {
+                if (!_mpBarCalibrated)
+                {
+                    MessageBox.Show("請先按「校準 MP 範圍」設定 MP 條位置。");
+                    chkMpMonitor.Checked = false;
+                    return;
+                }
+
+                _mpThresholdPercent = (int)numMpThreshold.Value;
+                _mpPotionKey = PotionKeyMap[(string)cmbMpPotionKey.SelectedItem];
+                numMpThreshold.Enabled = false;
+                cmbMpPotionKey.Enabled = false;
+                btnCalibrateMp.Enabled = false;
+
+                _mpMonitorCts = new CancellationTokenSource();
+                _ = Task.Run(() => MpMonitorLoopAsync(_mpMonitorCts.Token));
+            }
+            else
+            {
+                _mpMonitorCts?.Cancel();
+                _mpMonitorCts = null;
+                numMpThreshold.Enabled = true;
+                cmbMpPotionKey.Enabled = true;
+                btnCalibrateMp.Enabled = true;
+                lblMpStatus.Text = "MP 監控已停止";
+            }
+        }
+
+        private async Task MpMonitorLoopAsync(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    // 螢幕擷取抓到的是「目前顯示在螢幕上的畫面」，遊戲沒在前景時抓到的
+                    // 會是別的視窗內容，所以跟送按鍵一樣，只有遊戲在前景時才量測。
+                    if (IsGameWindowActive())
+                    {
+                        IntPtr gameHwnd = FindGameWindow();
+                        if (gameHwnd != IntPtr.Zero)
+                        {
+                            Rectangle clientRect = GetGameClientScreenRect(gameHwnd);
+                            Rectangle mpScreenRect = new Rectangle(
+                                clientRect.X + _mpBarRelativeRect.X,
+                                clientRect.Y + _mpBarRelativeRect.Y,
+                                _mpBarRelativeRect.Width,
+                                _mpBarRelativeRect.Height);
+
+                            double percent = MeasureBarFillPercent(mpScreenRect);
+                            if (percent >= 0)
+                            {
+                                if (IsHandleCreated)
+                                {
+                                    BeginInvoke(new Action(() => lblMpStatus.Text = $"目前 MP 約 {percent:0}%"));
+                                }
+
+                                if (percent < _mpThresholdPercent)
+                                {
+                                    await SendKeyHardwareAsync(_mpPotionKey, token);
+                                    await Task.Delay(2000, token); // 喝藥冷卻，避免連續狂按
+                                }
+                            }
+                        }
+                    }
+
+                    await Task.Delay(500, token);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch
+                {
+                    // 單次螢幕擷取失敗（例如視窗剛好在切換），略過這輪，下一輪再試
+                }
+            }
+        }
+
+        // 抓區域畫面後掃描。MapleStory 的血條數字（例如 4145/4285）通常疊在血條正中央，
+        // 只掃水平正中線常常會掃到文字筆畫、把掃描線提前中斷在文字上，導致量到的百分比
+        // 永遠偏低。改成分別在「偏上」「偏下」各掃一條線，取比較高的那個值——只要其中一條
+        // 沒被文字擋到，就能量到正確的填滿比例（掃描中斷只會讓數值偏低，不會偏高，所以取
+        // 兩者較高值是安全的）。
+        private static double MeasureBarFillPercent(Rectangle screenRect)
+        {
+            if (screenRect.Width <= 4 || screenRect.Height <= 1) return -1;
+
+            using var bmp = new Bitmap(screenRect.Width, screenRect.Height);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.CopyFromScreen(screenRect.Location, Point.Empty, screenRect.Size);
+            }
+
+            int yTop = Math.Max(0, screenRect.Height / 4);
+            int yBottom = Math.Min(screenRect.Height - 1, screenRect.Height - 1 - screenRect.Height / 4);
+
+            double percentTop = MeasureRowFillPercent(bmp, screenRect.Width, yTop);
+            double percentBottom = MeasureRowFillPercent(bmp, screenRect.Width, yBottom);
+
+            return Math.Max(percentTop, percentBottom);
+        }
+
+        // 同時取「靠左」跟「靠右」兩個內縮取樣點的顏色當基準（分別代表填滿色／底色），
+        // 每個像素就近判斷比較接近哪一邊，找出最後一個判定為「填滿」的位置。
+        // 內縮是為了避開框選範圍可能多框到的血條外框/邊線像素。
+        private static double MeasureRowFillPercent(Bitmap bmp, int width, int y)
+        {
+            int inset = Math.Max(1, Math.Min(3, width / 10));
+            Color filledColor = bmp.GetPixel(inset, y);
+            Color emptyColor = bmp.GetPixel(width - 1 - inset, y);
+
+            int lastFilledX = inset;
+            for (int x = inset; x < width - inset; x++)
+            {
+                Color c = bmp.GetPixel(x, y);
+                if (ColorDistance(c, filledColor) <= ColorDistance(c, emptyColor))
+                {
+                    lastFilledX = x;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            return (lastFilledX + 1) * 100.0 / width;
+        }
+
+        private static double ColorDistance(Color a, Color b)
+        {
+            int dr = a.R - b.R, dg = a.G - b.G, db = a.B - b.B;
+            return Math.Sqrt(dr * dr + dg * dg + db * db);
         }
     }
 }

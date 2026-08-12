@@ -34,6 +34,15 @@
             lblStatus = new Label();
             lblWindowTitle = new Label();
             txtWindowTitle = new TextBox();
+            btnCastSet3 = new Button();
+            chkMpMonitor = new CheckBox();
+            lblMpThreshold = new Label();
+            numMpThreshold = new NumericUpDown();
+            lblMpPotionKey = new Label();
+            cmbMpPotionKey = new ComboBox();
+            btnCalibrateMp = new Button();
+            lblMpStatus = new Label();
+            ((System.ComponentModel.ISupportInitialize)numMpThreshold).BeginInit();
             SuspendLayout();
             // 
             // btnStart
@@ -91,11 +100,95 @@
             txtWindowTitle.TabIndex = 5;
             txtWindowTitle.Text = "MapleStory";
             //
+            // btnCastSet3
+            //
+            btnCastSet3.Location = new Point(615, 148);
+            btnCastSet3.Name = "btnCastSet3";
+            btnCastSet3.Size = new Size(112, 34);
+            btnCastSet3.TabIndex = 6;
+            btnCastSet3.Text = "施放技能";
+            btnCastSet3.UseVisualStyleBackColor = true;
+            btnCastSet3.Visible = false;
+            btnCastSet3.Click += btnCastSet3_Click;
+            //
+            // chkMpMonitor
+            //
+            chkMpMonitor.AutoSize = true;
+            chkMpMonitor.Location = new Point(34, 200);
+            chkMpMonitor.Name = "chkMpMonitor";
+            chkMpMonitor.Size = new Size(120, 24);
+            chkMpMonitor.TabIndex = 7;
+            chkMpMonitor.Text = "啟用 MP 監控";
+            chkMpMonitor.UseVisualStyleBackColor = true;
+            chkMpMonitor.CheckedChanged += chkMpMonitor_CheckedChanged;
+            //
+            // lblMpThreshold
+            //
+            lblMpThreshold.AutoSize = true;
+            lblMpThreshold.Location = new Point(34, 234);
+            lblMpThreshold.Name = "lblMpThreshold";
+            lblMpThreshold.Size = new Size(100, 20);
+            lblMpThreshold.TabIndex = 8;
+            lblMpThreshold.Text = "MP 低於 (%)：";
+            //
+            // numMpThreshold
+            //
+            numMpThreshold.Location = new Point(34, 259);
+            numMpThreshold.Maximum = new decimal(new int[] { 100, 0, 0, 0 });
+            numMpThreshold.Name = "numMpThreshold";
+            numMpThreshold.Size = new Size(80, 27);
+            numMpThreshold.TabIndex = 9;
+            numMpThreshold.Value = new decimal(new int[] { 30, 0, 0, 0 });
+            //
+            // lblMpPotionKey
+            //
+            lblMpPotionKey.AutoSize = true;
+            lblMpPotionKey.Location = new Point(34, 296);
+            lblMpPotionKey.Name = "lblMpPotionKey";
+            lblMpPotionKey.Size = new Size(90, 20);
+            lblMpPotionKey.TabIndex = 10;
+            lblMpPotionKey.Text = "補 MP 按鍵：";
+            //
+            // cmbMpPotionKey
+            //
+            cmbMpPotionKey.DropDownStyle = ComboBoxStyle.DropDownList;
+            cmbMpPotionKey.Location = new Point(34, 321);
+            cmbMpPotionKey.Name = "cmbMpPotionKey";
+            cmbMpPotionKey.Size = new Size(160, 31);
+            cmbMpPotionKey.TabIndex = 11;
+            //
+            // btnCalibrateMp
+            //
+            btnCalibrateMp.Location = new Point(34, 361);
+            btnCalibrateMp.Name = "btnCalibrateMp";
+            btnCalibrateMp.Size = new Size(160, 34);
+            btnCalibrateMp.TabIndex = 12;
+            btnCalibrateMp.Text = "校準 MP 範圍";
+            btnCalibrateMp.UseVisualStyleBackColor = true;
+            btnCalibrateMp.Click += btnCalibrateMp_Click;
+            //
+            // lblMpStatus
+            //
+            lblMpStatus.AutoSize = true;
+            lblMpStatus.Location = new Point(34, 400);
+            lblMpStatus.Name = "lblMpStatus";
+            lblMpStatus.Size = new Size(140, 20);
+            lblMpStatus.TabIndex = 13;
+            lblMpStatus.Text = "MP 範圍尚未校準";
+            //
             // Form1
             //
             AutoScaleDimensions = new SizeF(11F, 23F);
             AutoScaleMode = AutoScaleMode.Font;
             ClientSize = new Size(800, 450);
+            Controls.Add(lblMpStatus);
+            Controls.Add(btnCalibrateMp);
+            Controls.Add(cmbMpPotionKey);
+            Controls.Add(lblMpPotionKey);
+            Controls.Add(numMpThreshold);
+            Controls.Add(lblMpThreshold);
+            Controls.Add(chkMpMonitor);
+            Controls.Add(btnCastSet3);
             Controls.Add(txtWindowTitle);
             Controls.Add(lblWindowTitle);
             Controls.Add(lblStatus);
@@ -105,7 +198,9 @@
             Name = "Form1";
             Text = "Form1";
             Load += Form1_Load;
+            ((System.ComponentModel.ISupportInitialize)numMpThreshold).EndInit();
             ResumeLayout(false);
+            PerformLayout();
         }
 
         #endregion
@@ -116,5 +211,13 @@
         private Label lblStatus;
         private Label lblWindowTitle;
         private TextBox txtWindowTitle;
+        private Button btnCastSet3;
+        private CheckBox chkMpMonitor;
+        private Label lblMpThreshold;
+        private NumericUpDown numMpThreshold;
+        private Label lblMpPotionKey;
+        private ComboBox cmbMpPotionKey;
+        private Button btnCalibrateMp;
+        private Label lblMpStatus;
     }
 }
