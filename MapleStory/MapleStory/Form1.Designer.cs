@@ -35,6 +35,9 @@
             lblWindowTitle = new Label();
             txtWindowTitle = new TextBox();
             btnCastSet3 = new Button();
+            lblSet3Countdown = new Label();
+            chkOverlay = new CheckBox();
+            btnMoveOverlay = new Button();
             chkMpMonitor = new CheckBox();
             lblMpThreshold = new Label();
             numMpThreshold = new NumericUpDown();
@@ -111,6 +114,39 @@
             btnCastSet3.Visible = false;
             btnCastSet3.Click += btnCastSet3_Click;
             //
+            // lblSet3Countdown
+            //
+            lblSet3Countdown.AutoSize = false;
+            lblSet3Countdown.Location = new Point(615, 188);
+            lblSet3Countdown.Name = "lblSet3Countdown";
+            lblSet3Countdown.Size = new Size(160, 24);
+            lblSet3Countdown.TabIndex = 14;
+            lblSet3Countdown.Text = "倒數：未開始";
+            lblSet3Countdown.Visible = false;
+            //
+            // chkOverlay
+            //
+            chkOverlay.AutoSize = true;
+            chkOverlay.Location = new Point(615, 218);
+            chkOverlay.Name = "chkOverlay";
+            chkOverlay.Size = new Size(150, 24);
+            chkOverlay.TabIndex = 15;
+            chkOverlay.Text = "顯示倒數浮動視窗";
+            chkOverlay.UseVisualStyleBackColor = true;
+            chkOverlay.Visible = false;
+            chkOverlay.CheckedChanged += chkOverlay_CheckedChanged;
+            //
+            // btnMoveOverlay
+            //
+            btnMoveOverlay.Location = new Point(615, 248);
+            btnMoveOverlay.Name = "btnMoveOverlay";
+            btnMoveOverlay.Size = new Size(160, 32);
+            btnMoveOverlay.TabIndex = 16;
+            btnMoveOverlay.Text = "解鎖位置（可拖曳）";
+            btnMoveOverlay.UseVisualStyleBackColor = true;
+            btnMoveOverlay.Visible = false;
+            btnMoveOverlay.Click += btnMoveOverlay_Click;
+            //
             // chkMpMonitor
             //
             chkMpMonitor.AutoSize = true;
@@ -169,10 +205,10 @@
             //
             // lblMpStatus
             //
-            lblMpStatus.AutoSize = true;
+            lblMpStatus.AutoSize = false;
             lblMpStatus.Location = new Point(34, 400);
             lblMpStatus.Name = "lblMpStatus";
-            lblMpStatus.Size = new Size(140, 20);
+            lblMpStatus.Size = new Size(700, 24);
             lblMpStatus.TabIndex = 13;
             lblMpStatus.Text = "MP 範圍尚未校準";
             //
@@ -188,6 +224,9 @@
             Controls.Add(numMpThreshold);
             Controls.Add(lblMpThreshold);
             Controls.Add(chkMpMonitor);
+            Controls.Add(btnMoveOverlay);
+            Controls.Add(chkOverlay);
+            Controls.Add(lblSet3Countdown);
             Controls.Add(btnCastSet3);
             Controls.Add(txtWindowTitle);
             Controls.Add(lblWindowTitle);
@@ -212,6 +251,9 @@
         private Label lblWindowTitle;
         private TextBox txtWindowTitle;
         private Button btnCastSet3;
+        private Label lblSet3Countdown;
+        private CheckBox chkOverlay;
+        private Button btnMoveOverlay;
         private CheckBox chkMpMonitor;
         private Label lblMpThreshold;
         private NumericUpDown numMpThreshold;

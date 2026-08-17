@@ -35,6 +35,8 @@ namespace MapleStory
         [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr hWnd);
         [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hWnd);
+        [DllImport("user32.dll")]
         private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
         [DllImport("user32.dll")]
         private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
@@ -92,10 +94,25 @@ namespace MapleStory
         private CancellationTokenSource _mpMonitorCts;
         private int _mpThresholdPercent = 30;
         private ushort _mpPotionKey = 0x22;
+        // Set 3 的提醒倒數：按下 F5 起算 4 分鐘，時間到會發出提示音，
+        // 提示音最多響 20 秒，期間沒有手動重新施放就自動補放一次。
+        private const int SET3_COUNTDOWN_SECONDS = 4 * 60;
+        private const int SET3_ALERT_SECONDS = 20;
+        private readonly System.Windows.Forms.Timer _set3CountdownTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+        private int _set3RemainingSeconds;
+        private int _set3AlertSecondsLeft;
+        private bool _set3AutoMode; // 曾經自動補放過，倒數字維持紅色直到手動按 F5
+        private CountdownOverlayForm? _overlay;
+
+        // 校準時學到的血條填滿色（以色相 + 飽和度表示，對亮度漸層與分隔線免疫）
+        private float _mpRefHue = 0f;
+        private float _mpRefSaturation = 0f;
+        private bool _mpColorsLearned = false;
 
         public Form1()
         {
             InitializeComponent();
+            _set3CountdownTimer.Tick += Set3CountdownTimer_Tick;
         }
 
         private void Form1_Load(object sender, EventArgs e)
@@ -133,7 +150,11 @@ namespace MapleStory
 
             // Set 3 是手動一次性施放技能組合，不走 Start/Stop 那種持續迴圈，
             // 選到 Set 3 時額外顯示「施放技能」鍵，Start/Stop 一律保留不隱藏。
-            btnCastSet3.Visible = currentTemplate == 3;
+            bool isSet3 = currentTemplate == 3;
+            btnCastSet3.Visible = isSet3;
+            lblSet3Countdown.Visible = isSet3;
+            chkOverlay.Visible = isSet3;
+            btnMoveOverlay.Visible = isSet3 && chkOverlay.Checked;
         }
 
         // 同步更新狀態列文字與標題列，這樣即使視窗被切到背景／縮到工作列，
@@ -150,6 +171,10 @@ namespace MapleStory
         {
             IntPtr hWnd = GetForegroundWindow();
             if (hWnd == IntPtr.Zero) return false;
+
+            // 本工具的標題「MapleStory 控制器」也含關鍵字，必須排除，
+            // 否則工具視窗在前景時會被誤判成遊戲視窗而照樣送出按鍵。
+            if (hWnd == this.Handle) return false;
 
             var sb = new StringBuilder(256);
             GetWindowText(hWnd, sb, sb.Capacity);
@@ -174,6 +199,8 @@ namespace MapleStory
         {
             _cts?.Cancel();
             _mpMonitorCts?.Cancel();
+            _set3CountdownTimer.Stop();
+            _overlay?.Close(); // 浮動視窗不屬於主視窗，不主動關閉的話程式不會真正結束
             UnregisterHotKey(this.Handle, STOP_HOTKEY_ID);
             UnregisterHotKey(this.Handle, CAST_HOTKEY_ID);
             base.OnFormClosing(e);
@@ -470,19 +497,24 @@ namespace MapleStory
         // Set 3：依序施放 A > F > X > C 一輪就結束（不會持續循環）
         private async void btnCastSet3_Click(object sender, EventArgs e)
         {
-            await CastSet3Async();
+            await CastSet3Async(isAuto: false);
         }
 
         // F5 熱鍵版本：只有選到 Set 3 時才有作用，避免在 Set 1/2 執行中誤觸
         private async void ExecuteCastSet3Hotkey()
         {
             if (currentTemplate != 3) return;
-            await CastSet3Async();
+            await CastSet3Async(isAuto: false);
         }
 
-        private async Task CastSet3Async()
+        private async Task CastSet3Async(bool isAuto)
         {
             if (!btnCastSet3.Enabled) return; // 正在施放中，避免重複觸發
+
+            // 倒數從「按下 F5 的當下」起算，所以在技能序列開始前就先重新計時。
+            // 手動施放會把自動模式解除（字轉回黑色），自動補放則維持紅字提醒。
+            _set3AutoMode = isAuto;
+            StartSet3Countdown();
 
             btnCastSet3.Enabled = false;
             cmbTemplate.Enabled = false;
@@ -508,6 +540,135 @@ namespace MapleStory
             }
         }
 
+        private void StartSet3Countdown()
+        {
+            _set3CountdownTimer.Stop();
+            _set3RemainingSeconds = SET3_COUNTDOWN_SECONDS;
+            _set3AlertSecondsLeft = 0;
+            UpdateSet3CountdownLabel();
+            _set3CountdownTimer.Start();
+        }
+
+        private void Set3CountdownTimer_Tick(object? sender, EventArgs e)
+        {
+            // 警示階段：每秒響一次提示音，最多維持 SET3_ALERT_SECONDS 秒。
+            // 期間手動按 F5 會重新計時並解除警示；撐完都沒人理就自動補放一次。
+            if (_set3AlertSecondsLeft > 0)
+            {
+                _set3AlertSecondsLeft--;
+                if (_set3AlertSecondsLeft > 0)
+                {
+                    UpdateSet3CountdownLabel();
+                    PlayReminderBeep();
+                    return;
+                }
+
+                _set3CountdownTimer.Stop();
+                _ = CastSet3Async(isAuto: true); // 內部會重新啟動倒數並維持紅字
+                return;
+            }
+
+            _set3RemainingSeconds--;
+
+            if (_set3RemainingSeconds > 0)
+            {
+                UpdateSet3CountdownLabel();
+                return;
+            }
+
+            // 倒數歸零，進入警示階段
+            _set3AlertSecondsLeft = SET3_ALERT_SECONDS;
+            UpdateSet3CountdownLabel();
+            PlayReminderBeep();
+        }
+
+        private void UpdateSet3CountdownLabel()
+        {
+            bool alerting = _set3AlertSecondsLeft > 0;
+            string text = alerting
+                ? $"時間到！{_set3AlertSecondsLeft} 秒後自動施放"
+                : $"倒數：{_set3RemainingSeconds / 60}:{_set3RemainingSeconds % 60:00}";
+
+            // 自動補放過之後字會一直維持紅色，直到自己再按一次 F5 才恢復
+            bool highlight = alerting || _set3AutoMode;
+
+            lblSet3Countdown.Text = text;
+            lblSet3Countdown.ForeColor = highlight ? Color.Red : SystemColors.ControlText;
+            _overlay?.SetText(text);
+            _overlay?.SetHighlighted(highlight);
+        }
+
+        private void chkOverlay_CheckedChanged(object sender, EventArgs e)
+        {
+            btnMoveOverlay.Visible = chkOverlay.Checked;
+
+            if (chkOverlay.Checked)
+            {
+                if (_overlay == null || _overlay.IsDisposed)
+                {
+                    _overlay = new CountdownOverlayForm();
+                    _overlay.Location = GetDefaultOverlayLocation();
+                }
+                _overlay.Show();
+                if (_set3CountdownTimer.Enabled)
+                {
+                    UpdateSet3CountdownLabel();
+                }
+                else
+                {
+                    _overlay.SetText("倒數：未開始");
+                    _overlay.SetHighlighted(false);
+                }
+            }
+            else
+            {
+                _overlay?.Hide();
+            }
+        }
+
+        // 預設擺在遊戲視窗客戶區的右上角附近；找不到遊戲視窗就擺在主螢幕右上角
+        private Point GetDefaultOverlayLocation()
+        {
+            IntPtr gameHwnd = FindGameWindow();
+            if (gameHwnd != IntPtr.Zero)
+            {
+                Rectangle clientRect = GetGameClientScreenRect(gameHwnd);
+                if (clientRect.Width > 0 && clientRect.Height > 0)
+                {
+                    return new Point(clientRect.Right - 220, clientRect.Y + 20);
+                }
+            }
+
+            Rectangle screen = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
+            return new Point(screen.Right - 220, screen.Y + 20);
+        }
+
+        private void btnMoveOverlay_Click(object sender, EventArgs e)
+        {
+            if (_overlay == null || _overlay.IsDisposed) return;
+
+            // 解鎖時關閉點擊穿透才拖得動，拖好後再鎖回去恢復不擋滑鼠
+            _overlay.ClickThrough = !_overlay.ClickThrough;
+            btnMoveOverlay.Text = _overlay.ClickThrough ? "解鎖位置（可拖曳）" : "鎖定位置（完成拖曳）";
+        }
+
+        // 每次呼叫響一短聲（由計時器每秒觸發一次）。
+        // Console.Beep 是同步阻塞的，丟到背景執行緒才不會卡住整個介面。
+        private static void PlayReminderBeep()
+        {
+            Task.Run(() =>
+            {
+                try
+                {
+                    Console.Beep(1000, 200);
+                }
+                catch
+                {
+                    // 某些環境（例如沒有喇叭裝置）呼叫 Beep 會失敗，忽略即可
+                }
+            });
+        }
+
         // ==========================================
         // MP 監控：抓螢幕上 MP 條那塊區域的顏色，量測填滿比例，低於門檻就按補 MP 鍵
 
@@ -520,10 +681,21 @@ namespace MapleStory
             {
                 if (!IsWindowVisible(hWnd)) return true;
 
+                // 【重要】排除本工具自己的視窗：標題「MapleStory 控制器」同樣包含關鍵字，
+                // 若不排除，校準時會把縮到最小的自己當成遊戲視窗，取到 0x0 的客戶區而崩潰。
+                if (hWnd == this.Handle) return true;
+                if (_overlay != null && !_overlay.IsDisposed && hWnd == _overlay.Handle) return true;
+
+                // 最小化的視窗客戶區是 0x0，一樣不能拿來當擷取目標
+                if (IsIconic(hWnd)) return true;
+
                 var sb = new StringBuilder(256);
                 GetWindowText(hWnd, sb, sb.Capacity);
                 if (sb.Length > 0 && sb.ToString().IndexOf(_targetWindowKeyword, StringComparison.OrdinalIgnoreCase) >= 0)
                 {
+                    GetClientRect(hWnd, out RECT rect);
+                    if (rect.Right - rect.Left <= 0 || rect.Bottom - rect.Top <= 0) return true;
+
                     found = hWnd;
                     return false;
                 }
@@ -540,7 +712,7 @@ namespace MapleStory
             return new Rectangle(topLeft.X, topLeft.Y, rect.Right - rect.Left, rect.Bottom - rect.Top);
         }
 
-        private void btnCalibrateMp_Click(object sender, EventArgs e)
+        private async void btnCalibrateMp_Click(object sender, EventArgs e)
         {
             IntPtr gameHwnd = FindGameWindow();
             if (gameHwnd == IntPtr.Zero)
@@ -549,32 +721,74 @@ namespace MapleStory
                 return;
             }
 
+            MessageBox.Show("【重要】請先把 MP 補到全滿，再進行校準。\n\n"
+                          + "接著框選「MP 藍色橫條」，大概框到就好：\n"
+                          + "程式會自動找出藍色範圍當作 100% 的基準，\n"
+                          + "多框到數字、邊框、背景都會自動忽略。");
+
             // 先縮小工具視窗，避免半透明覆蓋層上還疊著自己的視窗擋住遊戲畫面
             this.WindowState = FormWindowState.Minimized;
 
             Rectangle selected;
+            bool confirmed;
             using (var selector = new RegionSelectorForm())
             {
-                bool confirmed = selector.ShowDialog() == DialogResult.OK;
+                confirmed = selector.ShowDialog() == DialogResult.OK;
                 selected = selector.SelectedRectangle;
-                this.WindowState = FormWindowState.Normal;
-                if (!confirmed) return;
             }
 
-            if (selected.Width < 3 || selected.Height < 1)
+            if (!confirmed || selected.Width < 3 || selected.Height < 1)
             {
-                MessageBox.Show("選取範圍太小，請重新框選 MP 條。");
+                this.WindowState = FormWindowState.Normal;
+                if (confirmed) MessageBox.Show("選取範圍太小，請重新框選。");
                 return;
             }
 
-            Rectangle clientRect = GetGameClientScreenRect(gameHwnd);
-            _mpBarRelativeRect = new Rectangle(
-                selected.X - clientRect.X,
-                selected.Y - clientRect.Y,
-                selected.Width,
-                selected.Height);
-            _mpBarCalibrated = true;
-            lblMpStatus.Text = $"MP 範圍已校準（{_mpBarRelativeRect.Width}x{_mpBarRelativeRect.Height}）";
+            try
+            {
+                Rectangle clientRect = GetGameClientScreenRect(gameHwnd);
+                if (clientRect.Width <= 0 || clientRect.Height <= 0)
+                {
+                    this.WindowState = FormWindowState.Normal;
+                    MessageBox.Show("取得遊戲視窗範圍失敗，請確認遊戲視窗沒有被最小化。");
+                    return;
+                }
+
+                _mpColorsLearned = false; // 重新校準等於重新學習血條顏色
+                _mpBarCalibrated = false;
+
+                // 【重要】以下的擷取都要趁工具視窗還縮小著的時候做。
+                // 若先還原視窗再擷取，工具視窗可能正好蓋住遊戲的血條，
+                // 抓到的會是工具視窗自己，導致量到錯誤的數值。
+                await Task.Delay(300); // 等覆蓋層消失、遊戲畫面重繪完成
+
+                bool ok = TryCalibrateBar(selected, out Rectangle barRect, out string failReason);
+
+                this.WindowState = FormWindowState.Normal;
+
+                if (!ok)
+                {
+                    lblMpStatus.Text = $"校準失敗：{failReason}";
+                    return;
+                }
+
+                _mpBarRelativeRect = new Rectangle(
+                    barRect.X - clientRect.X,
+                    barRect.Y - clientRect.Y,
+                    barRect.Width,
+                    barRect.Height);
+                _mpBarCalibrated = true;
+
+                lblMpStatus.Text = $"校準成功：偵測到血條 {barRect.Width}x{barRect.Height}px（此刻視為 100%）";
+            }
+            catch (Exception ex)
+            {
+                // 校準流程跑在 async void 上，未攔截的例外會直接讓整個程式崩潰，
+                // 這裡收斂成畫面上的錯誤訊息，方便回報也不會中斷使用。
+                this.WindowState = FormWindowState.Normal;
+                _mpBarCalibrated = false;
+                lblMpStatus.Text = $"校準發生錯誤：{ex.Message}";
+            }
         }
 
         private void chkMpMonitor_CheckedChanged(object sender, EventArgs e)
@@ -628,19 +842,24 @@ namespace MapleStory
                                 _mpBarRelativeRect.Width,
                                 _mpBarRelativeRect.Height);
 
-                            double percent = MeasureBarFillPercent(mpScreenRect);
-                            if (percent >= 0)
+                            MpReading reading = MeasureMp(mpScreenRect);
+                            if (reading.Success)
                             {
                                 if (IsHandleCreated)
                                 {
-                                    BeginInvoke(new Action(() => lblMpStatus.Text = $"目前 MP 約 {percent:0}%"));
+                                    BeginInvoke(new Action(() => lblMpStatus.Text = $"目前 MP {reading.Percent:0}%"));
                                 }
 
-                                if (percent < _mpThresholdPercent)
+                                if (reading.Percent < _mpThresholdPercent)
                                 {
                                     await SendKeyHardwareAsync(_mpPotionKey, token);
                                     await Task.Delay(2000, token); // 喝藥冷卻，避免連續狂按
                                 }
+                            }
+                            else if (IsHandleCreated)
+                            {
+                                // 量不到就不動作，避免依據錯誤數值亂按藥水
+                                BeginInvoke(new Action(() => lblMpStatus.Text = $"量測失敗：{reading.FailReason}"));
                             }
                         }
                     }
@@ -658,14 +877,44 @@ namespace MapleStory
             }
         }
 
-        // 抓區域畫面後掃描。MapleStory 的血條數字（例如 4145/4285）通常疊在血條正中央，
-        // 只掃水平正中線常常會掃到文字筆畫、把掃描線提前中斷在文字上，導致量到的百分比
-        // 永遠偏低。改成分別在「偏上」「偏下」各掃一條線，取比較高的那個值——只要其中一條
-        // 沒被文字擋到，就能量到正確的填滿比例（掃描中斷只會讓數值偏低，不會偏高，所以取
-        // 兩者較高值是安全的）。
-        private static double MeasureBarFillPercent(Rectangle screenRect)
+        private sealed class MpReading
         {
-            if (screenRect.Width <= 4 || screenRect.Height <= 1) return -1;
+            public bool Success;
+            public double Percent;
+            public string FailReason = string.Empty;
+        }
+
+        // 判斷一個像素是不是「血條填滿色」。用色相（Hue）比對而不是整個 RGB 距離，
+        // 因為 MapleStory 的血條有一格格的分隔線和亮度漸層——同樣是藍色但深淺不同，
+        // 用 RGB 距離會被判成不同顏色，用色相就能全部視為同一種填滿色。
+        private bool IsFilledPixel(Color c)
+        {
+            float saturation = c.GetSaturation();
+            float brightness = c.GetBrightness();
+            if (saturation < _mpRefSaturation * 0.45f) return false; // 太灰（空槽、白字）
+            if (brightness < 0.12f || brightness > 0.97f) return false; // 太暗或過曝
+
+            float hueDiff = Math.Abs(c.GetHue() - _mpRefHue);
+            if (hueDiff > 180f) hueDiff = 360f - hueDiff; // 色相是環狀的
+            return hueDiff <= 28f;
+        }
+
+        // 量測血條填滿比例：逐「行」統計有多少像素屬於填滿色，
+        // 密度夠高的行才算填滿，再取最右邊那一行的位置當作填滿長度。
+        // 用「最右邊」而不是「連續長度」，所以分隔線造成的斷點完全不影響。
+        private MpReading MeasureMp(Rectangle screenRect)
+        {
+            var reading = new MpReading();
+            if (screenRect.Width <= 8 || screenRect.Height < 1)
+            {
+                reading.FailReason = "血條範圍太小";
+                return reading;
+            }
+            if (!_mpColorsLearned)
+            {
+                reading.FailReason = "尚未校準血條顏色";
+                return reading;
+            }
 
             using var bmp = new Bitmap(screenRect.Width, screenRect.Height);
             using (var g = Graphics.FromImage(bmp))
@@ -673,45 +922,108 @@ namespace MapleStory
                 g.CopyFromScreen(screenRect.Location, Point.Empty, screenRect.Size);
             }
 
-            int yTop = Math.Max(0, screenRect.Height / 4);
-            int yBottom = Math.Min(screenRect.Height - 1, screenRect.Height - 1 - screenRect.Height / 4);
+            int minCount = Math.Max(1, screenRect.Height / 3);
+            int rightmostFilled = -1;
 
-            double percentTop = MeasureRowFillPercent(bmp, screenRect.Width, yTop);
-            double percentBottom = MeasureRowFillPercent(bmp, screenRect.Width, yBottom);
+            for (int x = 0; x < screenRect.Width; x++)
+            {
+                int count = 0;
+                for (int y = 0; y < screenRect.Height; y++)
+                {
+                    if (IsFilledPixel(bmp.GetPixel(x, y))) count++;
+                }
+                if (count >= minCount) rightmostFilled = x;
+            }
 
-            return Math.Max(percentTop, percentBottom);
+            reading.Percent = (rightmostFilled + 1) * 100.0 / screenRect.Width;
+            reading.Success = true;
+            return reading;
         }
 
-        // 同時取「靠左」跟「靠右」兩個內縮取樣點的顏色當基準（分別代表填滿色／底色），
-        // 每個像素就近判斷比較接近哪一邊，找出最後一個判定為「填滿」的位置。
-        // 內縮是為了避開框選範圍可能多框到的血條外框/邊線像素。
-        private static double MeasureRowFillPercent(Bitmap bmp, int width, int y)
+        // 校準（要求 MP 全滿時執行）：在框選範圍內找出佔比最高的鮮豔色相當作填滿色，
+        // 再取所有符合該色相的像素的外接矩形——因為此刻血條是滿的，
+        // 這個矩形就等於整條血條的完整範圍，不必再猜血條右端在哪裡。
+        private bool TryCalibrateBar(Rectangle frameScreenRect, out Rectangle barScreenRect, out string failReason)
         {
-            int inset = Math.Max(1, Math.Min(3, width / 10));
-            Color filledColor = bmp.GetPixel(inset, y);
-            Color emptyColor = bmp.GetPixel(width - 1 - inset, y);
+            barScreenRect = frameScreenRect;
+            failReason = string.Empty;
 
-            int lastFilledX = inset;
-            for (int x = inset; x < width - inset; x++)
+            if (frameScreenRect.Width <= 0 || frameScreenRect.Height <= 0)
             {
-                Color c = bmp.GetPixel(x, y);
-                if (ColorDistance(c, filledColor) <= ColorDistance(c, emptyColor))
+                failReason = "框選範圍無效";
+                return false;
+            }
+
+            using var bmp = new Bitmap(frameScreenRect.Width, frameScreenRect.Height);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.CopyFromScreen(frameScreenRect.Location, Point.Empty, frameScreenRect.Size);
+            }
+
+            // 以 10 度為一格統計鮮豔像素的色相分布，最多的那一格就是血條顏色
+            var hueBuckets = new int[36];
+            var hueSums = new double[36];
+            var saturationSums = new double[36];
+
+            for (int y = 0; y < bmp.Height; y++)
+            {
+                for (int x = 0; x < bmp.Width; x++)
                 {
-                    lastFilledX = x;
-                }
-                else
-                {
-                    break;
+                    Color c = bmp.GetPixel(x, y);
+                    float s = c.GetSaturation();
+                    float b = c.GetBrightness();
+                    if (s < 0.35f || b < 0.15f || b > 0.95f) continue;
+
+                    int bucket = Math.Min(35, (int)(c.GetHue() / 10f));
+                    hueBuckets[bucket]++;
+                    hueSums[bucket] += c.GetHue();
+                    saturationSums[bucket] += s;
                 }
             }
 
-            return (lastFilledX + 1) * 100.0 / width;
-        }
+            int bestBucket = 0;
+            for (int i = 1; i < hueBuckets.Length; i++)
+            {
+                if (hueBuckets[i] > hueBuckets[bestBucket]) bestBucket = i;
+            }
 
-        private static double ColorDistance(Color a, Color b)
-        {
-            int dr = a.R - b.R, dg = a.G - b.G, db = a.B - b.B;
-            return Math.Sqrt(dr * dr + dg * dg + db * db);
+            if (hueBuckets[bestBucket] < 20)
+            {
+                failReason = "框選範圍內找不到鮮豔的血條顏色，請確認有框到藍色橫條";
+                return false;
+            }
+
+            _mpRefHue = (float)(hueSums[bestBucket] / hueBuckets[bestBucket]);
+            _mpRefSaturation = (float)(saturationSums[bestBucket] / hueBuckets[bestBucket]);
+            _mpColorsLearned = true;
+
+            // 取所有符合該色相的像素外接矩形 = 滿血時的血條範圍
+            int left = int.MaxValue, right = int.MinValue, top = int.MaxValue, bottom = int.MinValue;
+            for (int y = 0; y < bmp.Height; y++)
+            {
+                for (int x = 0; x < bmp.Width; x++)
+                {
+                    if (!IsFilledPixel(bmp.GetPixel(x, y))) continue;
+                    if (x < left) left = x;
+                    if (x > right) right = x;
+                    if (y < top) top = y;
+                    if (y > bottom) bottom = y;
+                }
+            }
+
+            if (right - left + 1 < 8 || bottom - top + 1 < 1)
+            {
+                _mpColorsLearned = false;
+                failReason = "偵測到的血條太小，請重新框選";
+                return false;
+            }
+
+            barScreenRect = new Rectangle(
+                frameScreenRect.X + left,
+                frameScreenRect.Y + top,
+                right - left + 1,
+                bottom - top + 1);
+            return true;
         }
     }
 }
